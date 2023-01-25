@@ -29,6 +29,9 @@ using System.Threading.Tasks;
 using System.Collections.ObjectModel;
 using CsvHelper;
 using System.Globalization;
+using Microsoft.UI.Composition.SystemBackdrops;
+using WinRT;
+using System.Runtime.InteropServices;
 
 // To learn more about WinUI, the WinUI project structure,
 // and more about our project templates, see: http://aka.ms/winui-project-info.
@@ -74,6 +77,8 @@ namespace ITATKWinUI
         public static string CurrentMultipleInput;
 
         private static string SingleOrMulti = "Single";
+
+        public Collection <Page> Pages = new Collection <Page> ();
 
         private static void LaunchScript(object sender, EventArgs e, string scriptPath, string args, string type, string inputType, string wait, string elevate, string hide)
         {
@@ -228,6 +233,7 @@ namespace ITATKWinUI
         public static Page GenerateCategoryPageFromXML(string name)
         {
             Page page = new Page();
+            page.Name = name;
             //ResourceDictionary myResourceDictionary = new ResourceDictionary();
             //myResourceDictionary.Source = new Uri("ResourceDictionary.xaml", UriKind.RelativeOrAbsolute);
             ////page.Resources.MergedDictionaries.Add(myResourceDictionary);
@@ -239,6 +245,8 @@ namespace ITATKWinUI
             TextBlock txtBlock = new TextBlock();
             txtBlock.Text = name;
             txtBlock.Padding = new Thickness(5);
+            txtBlock.FontSize = 24;
+            txtBlock.Margin = new Thickness(5);
             stackPanel.Children.Add(txtBlock);
 
             page.Content = stackPanel;
@@ -296,9 +304,24 @@ namespace ITATKWinUI
 
             SymbolIcon symbolIcon = new SymbolIcon();
             symbolIcon.Symbol = (Symbol)Enum.Parse(typeof(Symbol), icon);
-            var color = (Color)XamlBindingHelper.ConvertValue(typeof(Color), foreground);
-            var brush = new SolidColorBrush(color);
-            symbolIcon.Foreground = brush;
+
+            //Auto set White/Black to opposite values if they match the active theme
+            if((foreground == "White") && (App.Current.RequestedTheme == ApplicationTheme.Light))
+            {
+                foreground = "Black";
+            } else if((foreground == "Black") && (App.Current.RequestedTheme == ApplicationTheme.Dark))
+            {
+                foreground = "White";
+            }
+
+            if (foreground != "Default")
+            {
+                //If the color is set to "Default" we don't need to set the color
+                var color = (Color)XamlBindingHelper.ConvertValue(typeof(Color), foreground);
+                var brush = new SolidColorBrush(color);
+                symbolIcon.Foreground = brush;
+            }
+
             navigationViewItem.Icon = symbolIcon;
 
             return navigationViewItem;
@@ -337,7 +360,7 @@ namespace ITATKWinUI
             tmp.ExpandDirection = Microsoft.UI.Xaml.Controls.ExpandDirection.Down;
             tmp.HorizontalAlignment = Microsoft.UI.Xaml.HorizontalAlignment.Stretch;
             tmp.Padding = new Microsoft.UI.Xaml.Thickness(20);
-            tmp.Margin = new Microsoft.UI.Xaml.Thickness(10, 10, 10, 0);
+            tmp.Margin = new Microsoft.UI.Xaml.Thickness(25, 10, 25, 0);
 
             //Header Stack Panel
             StackPanel headerStack = new StackPanel();
@@ -463,9 +486,114 @@ namespace ITATKWinUI
 
         public static string SettingReportingLogLocation;
 
+        WindowsSystemDispatcherQueueHelper m_wsdqHelper; // See below for implementation.
+        MicaController m_backdropController;
+        SystemBackdropConfiguration m_configurationSource;
+
+        bool TrySetSystemBackdrop()
+        {
+            if (Microsoft.UI.Composition.SystemBackdrops.MicaController.IsSupported())
+            {
+                m_wsdqHelper = new WindowsSystemDispatcherQueueHelper();
+                m_wsdqHelper.EnsureWindowsSystemDispatcherQueueController();
+
+                // Create the policy object.
+                m_configurationSource = new SystemBackdropConfiguration();
+                this.Activated += Window_Activated;
+                this.Closed += Window_Closed;
+                ((FrameworkElement)this.Content).ActualThemeChanged += Window_ThemeChanged;
+
+                // Initial configuration state.
+                m_configurationSource.IsInputActive = true;
+                SetConfigurationSourceTheme();
+
+                m_backdropController = new Microsoft.UI.Composition.SystemBackdrops.MicaController();
+    
+            // Enable the system backdrop.
+            // Note: Be sure to have "using WinRT;" to support the Window.As<...>() call.
+            m_backdropController.AddSystemBackdropTarget(this.As<Microsoft.UI.Composition.ICompositionSupportsSystemBackdrop>());
+                m_backdropController.SetSystemBackdropConfiguration(m_configurationSource);
+                return true; // succeeded
+            }
+
+            return false; // Mica is not supported on this system
+        }
+
+        class WindowsSystemDispatcherQueueHelper
+        {
+            [StructLayout(LayoutKind.Sequential)]
+            struct DispatcherQueueOptions
+            {
+                internal int dwSize;
+                internal int threadType;
+                internal int apartmentType;
+            }
+
+            [DllImport("CoreMessaging.dll")]
+            private static extern int CreateDispatcherQueueController([In] DispatcherQueueOptions options, [In, Out, MarshalAs(UnmanagedType.IUnknown)] ref object dispatcherQueueController);
+
+            object m_dispatcherQueueController = null;
+            public void EnsureWindowsSystemDispatcherQueueController()
+            {
+                if (Windows.System.DispatcherQueue.GetForCurrentThread() != null)
+                {
+                    // one already exists, so we'll just use it.
+                    return;
+                }
+
+                if (m_dispatcherQueueController == null)
+                {
+                    DispatcherQueueOptions options;
+                    options.dwSize = Marshal.SizeOf(typeof(DispatcherQueueOptions));
+                    options.threadType = 2;    // DQTYPE_THREAD_CURRENT
+                    options.apartmentType = 2; // DQTAT_COM_STA
+
+                    CreateDispatcherQueueController(options, ref m_dispatcherQueueController);
+                }
+            }
+        }
+
+        private void Window_Activated(object sender, Microsoft.UI.Xaml.WindowActivatedEventArgs args)
+        {
+            m_configurationSource.IsInputActive = args.WindowActivationState != WindowActivationState.Deactivated;
+        }
+
+        private void Window_Closed(object sender, WindowEventArgs args)
+        {
+            // Make sure any Mica/Acrylic controller is disposed
+            // so it doesn't try to use this closed window.
+            if (m_backdropController != null)
+            {
+                m_backdropController.Dispose();
+                m_backdropController = null;
+            }
+            this.Activated -= Window_Activated;
+            m_configurationSource = null;
+        }
+
+        private void Window_ThemeChanged(FrameworkElement sender, object args)
+        {
+            if (m_configurationSource != null)
+            {
+                SetConfigurationSourceTheme();
+            }
+        }
+
+        private void SetConfigurationSourceTheme()
+        {
+            switch (((FrameworkElement)this.Content).ActualTheme)
+            {
+                case ElementTheme.Dark: m_configurationSource.Theme = Microsoft.UI.Composition.SystemBackdrops.SystemBackdropTheme.Dark; break;
+                case ElementTheme.Light: m_configurationSource.Theme = Microsoft.UI.Composition.SystemBackdrops.SystemBackdropTheme.Light; break;
+                case ElementTheme.Default: m_configurationSource.Theme = Microsoft.UI.Composition.SystemBackdrops.SystemBackdropTheme.Default; break;
+            }
+        }
+
         public MainWindow()
         {
             this.InitializeComponent();
+
+            TrySetSystemBackdrop();
 
             //Set the Navigation Title
             XDocument settingsXML = XDocument.Load(@"Settings.xml");
@@ -498,10 +626,12 @@ namespace ITATKWinUI
             guiConfig = XDocument.Load(@"XML\Scripts.xml");
             foreach (XElement item in from y in categoryConfig.Descendants("Item") select y)
             {
+                Pages.Add(GenerateCategoryPageFromXML(item.Attribute("category").Value)); //Add the page to a collection for later use
                 MainNav.MenuItems.Add(GenerateCategoryNavigationViewItemFromXML(item.Attribute("category").Value, item.Attribute("icon").Value, item.Attribute("foreground").Value));
             }
 
             //Select the first navigation item
+            //TODO: This will need to be adjusted once Dashboard and All Scripts are available, should this be a setting?
             MainNav.SelectedItem = MainNav.MenuItems[1]; //Index 1 because 0 is the "Categories" text header
 
             //We've got to check for updates in the main window due to a WinUI limitation that currently exists
@@ -537,7 +667,7 @@ namespace ITATKWinUI
                             LoadingText.Text = "Downloading update...";
                             string scriptName = "Updater.ps1";
                             string scriptPath = Environment.CurrentDirectory + "\\" + scriptName;
-                            LaunchScript(scriptPath, " -InstallPath \"" + Environment.CurrentDirectory + "\" -DownloadURL \"" + updateXMLData.Attribute("link").Value + "\"", "PS5", "None", "false", "true", "true"); //TODO: Should this be moved to run with the integrated host? Probably can't until elevation support is added to Windows App SDK with v1.1
+                            LaunchScript(scriptPath, " -InstallPath \"" + Environment.CurrentDirectory + "\" -DownloadURL \"" + updateXMLData.Attribute("link").Value + "\"", "PS5", "None", "false", "true", "true");
                             await Task.Run(() => Task.Delay(1000000)); //TODO: This needs fixed, for some reason WaitForExit() isn't working
                             //TODO: Run LoadingPhrase() on a loop
                         }
@@ -602,18 +732,35 @@ namespace ITATKWinUI
                 Type _page = null;
                 _page = typeof(Settings);
                 contentFrame.Navigate(_page);
-                //TODO: Should we hide the machine input, terminal, and machine info pane here? If so ensure we show it once we navigate away below
+                ContentSplitView.IsPaneOpen = false;
+                MachineDetailsToggleButton.IsChecked = false;
+                MachineInputs.Visibility = Visibility.Collapsed;
             } else if (args.SelectedItemContainer.Content.ToString() == "Reporting")
             {
                 Type _page = null;
                 _page = typeof(Reporting);
                 contentFrame.Navigate(_page);
+                MachineInputs.Visibility = Visibility.Visible;
+            }
+            else if (args.SelectedItemContainer.Content.ToString() == "All Scripts")
+            {
+                //TODO: Show all scripts in button form here
+            }
+            else if (args.SelectedItemContainer.Content.ToString() == "Dashboard")
+            {
+                //TODO: Show dashboard page
             }
             else
             {
-                Page _page = GenerateCategoryPageFromXML(args.SelectedItemContainer.Content.ToString());
+                //Page _page = GenerateCategoryPageFromXML(args.SelectedItemContainer.Content.ToString());
+                string PageName = args.SelectedItemContainer.Content.ToString();
+                var _page = from Page in Pages
+                            where Page.Name == PageName
+                            select Page;
+
                 //MainNav.Header = args.SelectedItemContainer.Content.ToString();
-                contentFrame.Content = _page; //TODO: This probably doesn't need to generate each time you click
+                contentFrame.Content = _page.FirstOrDefault();
+                MachineInputs.Visibility = Visibility.Visible;
             }
         }
 
